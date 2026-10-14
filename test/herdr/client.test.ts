@@ -18,7 +18,11 @@ import type {
 } from "../../src/domain/workspace.ts";
 import type { SyncDaemon } from "../../src/sync/daemon.ts";
 import type { HerdRClientService } from "../../src/herdr/client.ts";
-import { makeHerdRClient, resolveHerdRSocketPath } from "../../src/herdr/client.ts";
+import {
+    localSocketAddress,
+    makeHerdRClient,
+    resolveHerdRSocketPath,
+} from "../../src/herdr/client.ts";
 import { MAX_NDJSON_PARTIAL_FRAME_BYTES, NdjsonDecoder } from "../../src/herdr/ndjson.ts";
 import { isLifecycleEventName } from "../../src/herdr/protocol.ts";
 import { EditorAdapter } from "../../src/services/editor-adapter.ts";
@@ -226,7 +230,7 @@ const makeServer = async (): Promise<ServerHarness> => {
     const requests = new AsyncQueue<ReceivedRequest>();
     const closed = new AsyncQueue<ServerConnection>();
     const listener = Bun.listen<ServerConnection>({
-        unix: path,
+        unix: localSocketAddress(path),
         socket: {
             open(socket) {
                 socket.data = { buffer: "", decoder: new TextDecoder(), request: undefined };
@@ -265,17 +269,50 @@ const makeServer = async (): Promise<ServerHarness> => {
 
 test("resolveHerdRSocketPath gives HERDR_SOCKET_PATH precedence over named and default sessions", () => {
     expect(
-        resolveHerdRSocketPath({
-            HERDR_SOCKET_PATH: "/override/herdr.sock",
-            HERDR_SESSION: "named",
-            HOME: "/home/artisan",
-            XDG_CONFIG_HOME: "/config",
-        }),
+        resolveHerdRSocketPath(
+            {
+                HERDR_SOCKET_PATH: "/override/herdr.sock",
+                HERDR_SESSION: "named",
+                HOME: "/home/artisan",
+                XDG_CONFIG_HOME: "/config",
+            },
+            "linux",
+        ),
     ).toBe("/override/herdr.sock");
-    expect(resolveHerdRSocketPath({ HERDR_SESSION: "named", XDG_CONFIG_HOME: "/config" })).toBe(
-        "/config/herdr/sessions/named/herdr.sock",
+    expect(
+        resolveHerdRSocketPath({ HERDR_SESSION: "named", XDG_CONFIG_HOME: "/config" }, "linux"),
+    ).toBe("/config/herdr/sessions/named/herdr.sock");
+    expect(resolveHerdRSocketPath({ HOME: "/home/artisan" }, "linux")).toBe(
+        "/home/artisan/.config/herdr/herdr.sock",
     );
-    expect(resolveHerdRSocketPath({ HOME: "/home/artisan" })).toBe(
+});
+
+test("resolves HerdR's Windows socket pathname and its named-pipe address", () => {
+    const appData = "C:\\Users\\artisan\\AppData\\Roaming";
+    expect(
+        resolveHerdRSocketPath(
+            { HERDR_SOCKET_PATH: "C:\\override\\herdr.sock", APPDATA: appData },
+            "win32",
+        ),
+    ).toBe("C:\\override\\herdr.sock");
+    expect(resolveHerdRSocketPath({ APPDATA: appData }, "win32")).toBe(
+        "C:\\Users\\artisan\\AppData\\Roaming\\herdr\\herdr.sock",
+    );
+    expect(
+        resolveHerdRSocketPath(
+            { HERDR_SESSION: "named", XDG_CONFIG_HOME: "D:\\config", APPDATA: appData },
+            "win32",
+        ),
+    ).toBe("D:\\config\\herdr\\sessions\\named\\herdr.sock");
+    expect(resolveHerdRSocketPath({ USERPROFILE: "C:\\Users\\artisan" }, "win32")).toBe(
+        "C:\\Users\\artisan\\AppData\\Roaming\\herdr\\herdr.sock",
+    );
+
+    expect(localSocketAddress(`${appData}\\herdr\\herdr.sock`, "win32")).toBe(
+        "\\\\.\\pipe\\C:\\Users\\artisan\\AppData\\Roaming\\herdr\\herdr.sock",
+    );
+    expect(localSocketAddress("\\\\.\\pipe\\custom", "win32")).toBe("\\\\.\\pipe\\custom");
+    expect(localSocketAddress("/home/artisan/.config/herdr/herdr.sock", "linux")).toBe(
         "/home/artisan/.config/herdr/herdr.sock",
     );
 });

@@ -14,7 +14,7 @@ import { dirname, join, resolve } from "node:path";
 
 import * as Schema from "effect/Schema";
 
-import { resolveHerdRSocketPath } from "../herdr/client.ts";
+import { localSocketAddress, resolveHerdRSocketPath } from "../herdr/client.ts";
 import {
     ControlRequest,
     ControlResponse,
@@ -26,6 +26,15 @@ import {
 export const CONTROL_SOCKET_MAX_BYTES = 64 * 1024;
 export const CONTROL_SOCKET_MODE = 0o600;
 export const CONTROL_DAEMON_IDENTITY = "artisann.zed-herdr:daemon" as const;
+
+/**
+ * Windows serves the control endpoint as a named pipe (see `localSocketAddress`). A pipe has no
+ * filesystem entry, Windows synthesizes POSIX uid/mode bits, and the pipe vanishes with its server,
+ * so the inode, ownership, and mode checks below apply only to Unix sockets. On Windows the pipe's
+ * default DACL grants write access only to the creating account, SYSTEM, and Administrators, and the
+ * first-instance bind refuses a second server for the same name.
+ */
+const namedPipeControl = process.platform === "win32";
 
 export class AlreadyRunning extends Error {
     readonly _tag = "AlreadyRunning";
@@ -167,9 +176,11 @@ export interface ControlSocketConnector {
 const bunControlSocketConnector: ControlSocketConnector = {
     connect(path) {
         return Bun.connect({
-            unix: path,
+            unix: localSocketAddress(path),
             socket: {
                 data() {},
+                // The probe hangs up right after connecting; a late reset must not stop the caller.
+                error() {},
             },
         });
     },
@@ -218,7 +229,10 @@ export const probeControlSocket = async (
     }
 };
 
-/** Derive the per-HerdR-session owner-only control socket pathname. */
+/**
+ * Derive the per-HerdR-session owner-only control socket pathname. On Windows the pathname names
+ * the control pipe, and its directory holds only the hook lock.
+ */
 export const controlSocketPath = (environment: NodeJS.ProcessEnv = process.env): string => {
     const herdRSocket = resolve(resolveHerdRSocketPath(environment));
     const digest = createHash("sha256").update(herdRSocket).digest("hex").slice(0, 16);
@@ -237,8 +251,7 @@ const validateControlSocketParent = async (path: string): Promise<void> => {
         if (
             stat.isSymbolicLink() ||
             !stat.isDirectory() ||
-            stat.uid !== currentUid() ||
-            (stat.mode & 0o022) !== 0
+            (!namedPipeControl && (stat.uid !== currentUid() || (stat.mode & 0o022) !== 0))
         ) {
             throw new UnsafeControlSocket(path, "unsafe_parent");
         }
@@ -258,6 +271,9 @@ const validateControlSocketDirectory = async (path: string): Promise<boolean> =>
         }
         if (!stat.isDirectory()) {
             throw new UnsafeControlSocket(path, "not_directory");
+        }
+        if (namedPipeControl) {
+            return true;
         }
         if (stat.uid !== currentUid()) {
             throw new UnsafeControlSocket(path, "foreign_owner");
@@ -333,6 +349,12 @@ const lstatOwnedSocket = async (path: string): Promise<SocketIdentity | null> =>
  * is the same current-user Unix socket that was found after a failed liveness probe.
  */
 export const prepareControlSocket = async (path: string): Promise<void> => {
+    if (namedPipeControl) {
+        if (await probeControlSocket(path)) {
+            throw new AlreadyRunning(path);
+        }
+        return;
+    }
     const before = await lstatOwnedSocket(path);
 
     if (await probeControlSocket(path)) {
@@ -515,7 +537,10 @@ const responseFor = (
     );
 };
 
-/** Bind the daemon's owner-only Unix listener and return an inode-safe finalizer. */
+/**
+ * Bind the daemon's owner-only listener and return its finalizer: an inode-safe one for a Unix
+ * socket, a plain listener stop for a Windows named pipe.
+ */
 export const startControlServer = async (
     options: StartControlServerOptions,
 ): Promise<ControlServer> => {
@@ -565,7 +590,7 @@ export const startControlServer = async (
         const priorUmask = process.umask(0o177);
         try {
             return Bun.listen<ConnectionState>({
-                unix: options.path,
+                unix: localSocketAddress(options.path),
                 allowHalfOpen: true,
                 socket: {
                     open(socket) {
@@ -646,12 +671,30 @@ export const startControlServer = async (
                         }
                         processBufferedRequest(socket);
                     },
+                    error(socket) {
+                        // Bun reports a write to a peer that already hung up (such as a liveness
+                        // probe on a Windows pipe) here; without this handler it stops the daemon.
+                        socket.terminate();
+                    },
                 },
             });
         } finally {
             process.umask(priorUmask);
         }
     })();
+
+    if (namedPipeControl) {
+        return {
+            path: options.path,
+            get daemon() {
+                return daemon();
+            },
+            close(): Promise<void> {
+                listener.stop(true);
+                return Promise.resolve();
+            },
+        };
+    }
 
     try {
         const boundStat = await lstat(options.path);
@@ -772,7 +815,7 @@ const requestControl = async (
     request: unknown,
     timeoutMs: number,
 ): Promise<ControlResponseValue> => {
-    const identity = await lstatOwnedSocket(path);
+    const identity = namedPipeControl ? undefined : await lstatOwnedSocket(path);
     if (identity === null) {
         throw new ControlUnavailable(path, "connect");
     }
@@ -862,7 +905,7 @@ const requestControl = async (
         };
 
         void Bun.connect({
-            unix: path,
+            unix: localSocketAddress(path),
             allowHalfOpen: true,
             socket: {
                 data(client, chunk) {
@@ -949,6 +992,10 @@ const requestControl = async (
                 socket = connected;
                 if (settled) {
                     connected.terminate();
+                    return;
+                }
+                if (identity === undefined) {
+                    connected.write(`${JSON.stringify(request)}\n`);
                     return;
                 }
                 void lstatOwnedSocket(path).then(

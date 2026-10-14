@@ -30,6 +30,12 @@ const LOCK_STALE_MS = 5_000;
 const LOCK_POLL_MS = 25;
 const PLUGIN_ID = "artisann.zed-herdr";
 
+/**
+ * Windows synthesizes POSIX mode bits (0o666) and uid 0, and reports a directory rename onto an
+ * existing directory as EPERM. The lock still lives in the account-private control directory.
+ */
+const windowsFilesystem = process.platform === "win32";
+
 const NonEmptyText = Schema.String.pipe(Schema.nonEmptyString(), Schema.maxLength(4_096));
 const HookEvent = Schema.Struct({
     data: Schema.Struct({
@@ -183,6 +189,13 @@ export const decodeHookNotification = (
 const isNodeError = (error: unknown, code: string): boolean =>
     typeof error === "object" && error !== null && "code" in error && error.code === code;
 
+/**
+ * Windows keeps a deleted lock entry until its last open handle closes and reports it as EPERM in
+ * the meantime, so another contender's release surfaces as EPERM rather than ENOENT there.
+ */
+const isReleasedLockEntry = (error: unknown): boolean =>
+    isNodeError(error, "ENOENT") || (windowsFilesystem && isNodeError(error, "EPERM"));
+
 const currentUid = (): number | undefined => process.getuid?.();
 
 const sameIdentity = (left: LockIdentity, right: LockIdentity): boolean =>
@@ -211,7 +224,7 @@ const inspectLock = async (path: string): Promise<LockInspection> => {
     if (
         directory.isSymbolicLink() ||
         !directory.isDirectory() ||
-        (directory.mode & 0o777) !== 0o700 ||
+        (!windowsFilesystem && (directory.mode & 0o777) !== 0o700) ||
         (currentUid() !== undefined && directory.uid !== currentUid())
     ) {
         throw new HookStartupError("lock", `Refusing unsafe hook lock at ${path}`);
@@ -236,7 +249,7 @@ const inspectLock = async (path: string): Promise<LockInspection> => {
     if (
         owner.isSymbolicLink() ||
         !owner.isFile() ||
-        (owner.mode & 0o777) !== 0o600 ||
+        (!windowsFilesystem && (owner.mode & 0o777) !== 0o600) ||
         (currentUid() !== undefined && owner.uid !== currentUid())
     ) {
         throw new HookStartupError("lock", `Refusing unsafe hook lock owner at ${path}`);
@@ -264,7 +277,7 @@ const removeEmptyLockDirectory = async (
     try {
         current = await inspectLock(path);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return false;
         }
         throw error;
@@ -277,7 +290,7 @@ const removeEmptyLockDirectory = async (
         await rmdir(path);
         return true;
     } catch (error) {
-        if (isNodeError(error, "ENOENT") || isNodeError(error, "ENOTEMPTY")) {
+        if (isReleasedLockEntry(error) || isNodeError(error, "ENOTEMPTY")) {
             return false;
         }
         throw error;
@@ -292,7 +305,7 @@ const removeCapturedLock = async (path: string, current: LockInspection): Promis
     try {
         await unlink(current.ownerPath);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return false;
         }
         throw error;
@@ -305,7 +318,7 @@ const removeStaleLock = async (path: string, now: number): Promise<boolean> => {
     try {
         initial = await inspectLock(path);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return false;
         }
         throw error;
@@ -319,7 +332,7 @@ const removeStaleLock = async (path: string, now: number): Promise<boolean> => {
     try {
         current = await inspectLock(path);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return false;
         }
         throw error;
@@ -391,7 +404,7 @@ const acquireLock = async (
             await lstat(path);
             canonicalExists = true;
         } catch (error) {
-            if (!isNodeError(error, "ENOENT")) {
+            if (!isReleasedLockEntry(error)) {
                 await rm(candidate, { recursive: true, force: true });
                 throw new HookStartupError(
                     "lock",
@@ -406,7 +419,11 @@ const acquireLock = async (
                 return;
             } catch (error) {
                 await rm(candidate, { recursive: true, force: true });
-                if (!isNodeError(error, "EEXIST") && !isNodeError(error, "ENOTEMPTY")) {
+                if (
+                    !isNodeError(error, "EEXIST") &&
+                    !isNodeError(error, "ENOTEMPTY") &&
+                    !(windowsFilesystem && isNodeError(error, "EPERM"))
+                ) {
                     throw new HookStartupError(
                         "lock",
                         `Unable to acquire hook lock at ${path}: ${String(error)}`,
@@ -433,7 +450,7 @@ const releaseLock = async (path: string, token: string): Promise<void> => {
     try {
         current = await inspectLock(path);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return;
         }
         throw error;
@@ -447,7 +464,7 @@ const releaseLock = async (path: string, token: string): Promise<void> => {
     try {
         final = await inspectLock(path);
     } catch (error) {
-        if (isNodeError(error, "ENOENT")) {
+        if (isReleasedLockEntry(error)) {
             return;
         }
         throw error;

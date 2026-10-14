@@ -7,6 +7,7 @@ import * as Schema from "effect/Schema";
 import * as Runtime from "effect/Runtime";
 import * as Stream from "effect/Stream";
 import { homedir } from "node:os";
+import { win32 } from "node:path";
 
 import {
     StaleWorkspaceGeneration,
@@ -40,23 +41,47 @@ const retryMaximumDelayMs = 5_000;
 const BOOTSTRAP_TIMEOUT_MS = 5_000;
 const maxLogCauseLength = 4_096;
 
-/** Resolve HerdR's Unix socket without probing or mutating the filesystem. */
-export const resolveHerdRSocketPath = (environment: NodeJS.ProcessEnv = process.env): string => {
+/** Resolve HerdR's socket pathname without probing or mutating the filesystem. */
+export const resolveHerdRSocketPath = (
+    environment: NodeJS.ProcessEnv = process.env,
+    platform: NodeJS.Platform = process.platform,
+): string => {
     const configuredSocket = environment.HERDR_SOCKET_PATH;
     if (configuredSocket !== undefined && configuredSocket.length > 0) {
         return configuredSocket;
+    }
+
+    const session = environment.HERDR_SESSION;
+    if (platform === "win32") {
+        const configHome =
+            environment.XDG_CONFIG_HOME ||
+            environment.APPDATA ||
+            win32.join(environment.USERPROFILE ?? homedir(), "AppData", "Roaming");
+        return session !== undefined && session.length > 0
+            ? win32.join(configHome, "herdr", "sessions", session, "herdr.sock")
+            : win32.join(configHome, "herdr", "herdr.sock");
     }
 
     const configHome =
         environment.XDG_CONFIG_HOME && environment.XDG_CONFIG_HOME.length > 0
             ? environment.XDG_CONFIG_HOME
             : `${environment.HOME ?? homedir()}/.config`;
-    const session = environment.HERDR_SESSION;
 
     return session !== undefined && session.length > 0
         ? `${configHome}/herdr/sessions/${session}/herdr.sock`
         : `${configHome}/herdr/herdr.sock`;
 };
+
+/**
+ * Map a local socket pathname to the endpoint Bun connects to or listens on. On Windows, HerdR
+ * serves its socket pathname as the named pipe `\\.\pipe\<pathname>` and leaves only a marker
+ * file at the pathname; this plugin's control endpoint follows the same convention.
+ */
+export const localSocketAddress = (
+    path: string,
+    platform: NodeJS.Platform = process.platform,
+): string =>
+    platform === "win32" && !/^\\\\[.?]\\pipe\\/i.test(path) ? `\\\\.\\pipe\\${path}` : path;
 
 export interface HerdRProtocolStatus {
     readonly protocol: number | null;
@@ -424,7 +449,7 @@ class LiveHerdRClient implements HerdRClientService {
         };
 
         void Bun.connect({
-            unix: this.socketPath,
+            unix: localSocketAddress(this.socketPath),
             socket: {
                 binaryType: "uint8array",
                 data: (_socket, data) => {
@@ -561,7 +586,7 @@ class LiveHerdRClient implements HerdRClientService {
         };
 
         void Bun.connect({
-            unix: this.socketPath,
+            unix: localSocketAddress(this.socketPath),
             socket: {
                 binaryType: "uint8array",
                 data: (_socket, data) => {

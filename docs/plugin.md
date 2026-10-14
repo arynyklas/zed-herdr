@@ -23,7 +23,7 @@ Both execute `bun ./dist/index.js hook`. The manifest's `daemon` pane executes
 The manifest also declares the workspace-scoped `toggle` action, which executes
 `bun ./dist/index.js toggle` and pauses or resumes the live daemon without disabling the plugin.
 HerdR keybindings are user configuration, not plugin-manifest fields. Install the binding in
-`~/.config/herdr/config.toml`:
+`~/.config/herdr/config.toml` (`%APPDATA%\herdr\config.toml` on Windows):
 
 ```toml
 [[keys.command]]
@@ -77,6 +77,20 @@ Preparation refuses a live socket. An orphan is probed twice, identity-checked, 
 a quarantine name, revalidated, and only then removed. Races fail closed or restore the preserved
 entry without replacing a winner. Server shutdown likewise removes only the inode it bound and
 restores a replacement without clobbering it.
+
+On Windows the control endpoint is the named pipe `\\.\pipe\<controlSocketPath>`, the convention
+HerdR uses for its own socket, so no filesystem socket exists. The parent and control directory
+must still be existing non-symlink directories, but Windows synthesizes uid and mode bits, so the
+ownership and mode checks are skipped; by default the directory sits in the account-private
+`%APPDATA%\herdr` tree and holds only the hook lock. Preparation probes the pipe and refuses a live
+daemon; there is no orphan to clear because a pipe disappears with its server. The listener binds
+the first pipe instance, so a second daemon fails with `EADDRINUSE`, and the pipe's default DACL
+grants write access only to the creating account, SYSTEM, and Administrators. Lock mode checks are
+skipped likewise, and `EPERM` from a delete-pending lock entry or a directory rename onto an
+existing lock counts as contention.
+
+On every platform the listener handles per-connection socket errors: a peer that hangs up before
+its response (such as a liveness probe) surfaces as `EPIPE` there instead of stopping the daemon.
 
 ### Wire protocol and application bridge
 

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import * as Schema from "effect/Schema";
 
+import { localSocketAddress } from "../../src/herdr/client.ts";
 import { HookNotification } from "../../src/plugin/protocol.ts";
 import {
     AlreadyRunning,
@@ -107,7 +108,7 @@ const rawRequest = async (
         };
 
         void Bun.connect({
-            unix: path,
+            unix: localSocketAddress(path),
             allowHalfOpen: true,
             socket: {
                 data(_socket, chunk) {
@@ -615,7 +616,7 @@ test("rejects a newline-terminated oversized control response", async () => {
         socket.end();
     };
     const listener = Bun.listen<{ offset: number }>({
-        unix: path,
+        unix: localSocketAddress(path),
         socket: {
             open(socket) {
                 socket.data = { offset: 0 };
@@ -641,7 +642,7 @@ test("rejects response bytes written after a completed response frame", async ()
     const directory = await makeTemporaryDirectory();
     const path = `${directory}/trailing-response.sock`;
     const listener = Bun.listen({
-        unix: path,
+        unix: localSocketAddress(path),
         allowHalfOpen: true,
         socket: {
             data(socket) {
@@ -668,7 +669,7 @@ test("rejects an incomplete UTF-8 suffix after a completed response frame", asyn
     responseWithBufferedUtf8Suffix.set(response);
     responseWithBufferedUtf8Suffix[response.byteLength] = 0xf0;
     const listener = Bun.listen({
-        unix: path,
+        unix: localSocketAddress(path),
         socket: {
             data(socket) {
                 socket.end(responseWithBufferedUtf8Suffix);
@@ -691,7 +692,7 @@ test("rejects a notify acknowledgement carrying malformed daemon fields", async 
     const directory = await makeTemporaryDirectory();
     const path = `${directory}/malformed-notify.sock`;
     const listener = Bun.listen({
-        unix: path,
+        unix: localSocketAddress(path),
         socket: {
             data(socket) {
                 socket.end('{"ok":true,"daemon":"spoofed"}\n');

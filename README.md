@@ -2,7 +2,7 @@
 
 [![Plugin Demo](https://img.youtube.com/vi/Q_i-IKda7hE/maxresdefault.jpg)](https://youtu.be/Q_i-IKda7hE)
 
-HerdR plugin `artisann.zed-herdr` keeps the active HerdR workspace available in Zed without taking ownership of either application. It supports macOS and Linux, HerdR **0.7.3+** reporting protocol **16 or newer** (tested through protocol **22**, HerdR 0.9.3), Bun, Git, and Zed with its `zed` CLI available.
+HerdR plugin `artisann.zed-herdr` keeps the active HerdR workspace available in Zed without taking ownership of either application. It supports macOS, Linux, and Windows, HerdR **0.7.3+** reporting protocol **16 or newer** (tested through protocol **22**, HerdR 0.9.3), Bun, Git, and Zed with its `zed` CLI available. Windows relies on HerdR's preview Windows plugin support and was verified with HerdR 0.9.3, Bun 1.4.2, and Zed 1.22.
 
 For contributor architecture and subsystem internals, see [the documentation index](docs/README.md).
 
@@ -79,19 +79,21 @@ Set `ZED_BIN` to a non-empty executable path to select a Zed CLI explicitly:
 export ZED_BIN=/absolute/path/to/zed
 ```
 
-Without `ZED_BIN`, the daemon resolves `zed` from `PATH`; on macOS an executable-not-found result also tries Zed's standard application CLI path. It invokes only `zed -e <absolute-git-root>`.
+Without `ZED_BIN`, the daemon resolves `zed` from `PATH`; on macOS an executable-not-found result also tries Zed's standard application CLI path. On Windows, Zed's installer puts `zed.exe` on `PATH` (`%LOCALAPPDATA%\Programs\Zed\bin`). It invokes only `zed -e <absolute-git-root>`.
 
 For HerdR transport, `HERDR_SOCKET_PATH` takes precedence. Otherwise the socket is resolved as:
 
 1. `$XDG_CONFIG_HOME/herdr/sessions/$HERDR_SESSION/herdr.sock` for a named session, or `~/.config/herdr/sessions/$HERDR_SESSION/herdr.sock` when `XDG_CONFIG_HOME` is unset.
 2. `$XDG_CONFIG_HOME/herdr/herdr.sock`, or `~/.config/herdr/herdr.sock`, when there is no named session.
 
+On Windows, `%APPDATA%` replaces `~/.config` (for example `%APPDATA%\herdr\herdr.sock`), and both HerdR and this plugin's control endpoint listen on the named pipe `\\.\pipe\<socket pathname>`; the `herdr.sock` file is only HerdR's marker.
+
 The daemon reads HerdR snapshots and lifecycle events, then asks Zed to add/focus a validated Git root. It never sends a mutating HerdR request, kills a process, reuses an existing pane, replaces Zed window/project state, accesses Zed's private storage, or uses Zed's state-replacing CLI options. Non-worktree workspaces wait for the plugin hook's workspace cwd hint; ambiguous, inaccessible, or non-Git paths are skipped.
 
 ## Pause and resume Zed control
 
 HerdR plugin manifests declare actions but do not install user keybindings. Add this command binding
-to `~/.config/herdr/config.toml`:
+to `~/.config/herdr/config.toml` (`%APPDATA%\herdr\config.toml` on Windows):
 
 ```toml
 [[keys.command]]

@@ -42,7 +42,8 @@ names are ignored.
 
 ## Contracts and state
 
-`LiveHerdRClient` owns the Unix sockets, monotonically increasing connection generations,
+`LiveHerdRClient` owns the local sockets (Unix sockets, or named pipes on Windows via
+`localSocketAddress`), monotonically increasing connection generations,
 generation-local snapshot requests, the current live subscription, reconnect state, and a
 replay-one `PubSub`. Replay one lets a consumer that subscribes after acknowledgement still receive
 the most recent source event.

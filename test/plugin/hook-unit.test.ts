@@ -57,7 +57,7 @@ test("declares the official HerdR v0.7.3 plugin manifest", async () => {
         name: "Zed Workspace Sync",
         version: "0.1.0",
         min_herdr_version: "0.7.3",
-        platforms: ["macos", "linux"],
+        platforms: ["macos", "linux", "windows"],
         build: [
             { command: ["bun", "install", "--frozen-lockfile"] },
             { command: ["bun", "run", "build"] },
@@ -363,24 +363,28 @@ test("opens the exact unfocused daemon argv once while twenty hooks contend", as
     }
 });
 
-test("fails closed on a non-owner-only canonical lock directory", async () => {
-    const directory = await temporaryDirectory();
-    try {
-        const path = join(directory, "control.sock");
-        const lockPath = `${path}.lock`;
-        await mkdir(lockPath, { mode: 0o700 });
-        await chmod(lockPath, 0o755);
+// Windows synthesizes directory mode bits, so a group/other-readable lock cannot be expressed there.
+test.skipIf(process.platform === "win32")(
+    "fails closed on a non-owner-only canonical lock directory",
+    async () => {
+        const directory = await temporaryDirectory();
+        try {
+            const path = join(directory, "control.sock");
+            const lockPath = `${path}.lock`;
+            await mkdir(lockPath, { mode: 0o700 });
+            await chmod(lockPath, 0o755);
 
-        await expect(
-            runHook({
-                control: controlFor(path, unavailable),
-                environment: hookEnvironment(),
-            }),
-        ).rejects.toMatchObject({ _tag: "HookStartupError", operation: "lock" });
-    } finally {
-        await rm(directory, { recursive: true, force: true });
-    }
-});
+            await expect(
+                runHook({
+                    control: controlFor(path, unavailable),
+                    environment: hookEnvironment(),
+                }),
+            ).rejects.toMatchObject({ _tag: "HookStartupError", operation: "lock" });
+        } finally {
+            await rm(directory, { recursive: true, force: true });
+        }
+    },
+);
 
 test("rejects invalid and incomplete lock owner schemas", async () => {
     const directory = await temporaryDirectory();

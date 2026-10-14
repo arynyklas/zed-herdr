@@ -4,7 +4,7 @@
 
 `zed-herdr` is a private Bun/TypeScript application that keeps the active HerdR workspace available in an existing Zed session. HerdR socket protocol 16 or newer is authoritative for workspace state, with compatibility tested through protocol 22 (HerdR 0.9.3). The daemon consumes read-only HerdR snapshots/events and plugin cwd hints, resolves Git roots, then invokes only Zed's supported `zed -e <absolute-git-root>` command. It must not inspect Zed databases, replace windows, kill processes, or mutate existing HerdR panes.
 
-Supported hosts are macOS and Linux with Bun, Git, HerdR `>=0.7.3` reporting protocol `>=16`, and the Zed CLI.
+Supported hosts are macOS, Linux, and Windows with Bun, Git, HerdR `>=0.7.3` reporting protocol `>=16`, and the Zed CLI. Windows depends on HerdR's preview Windows plugin support.
 
 ## Architecture & Data Flow
 
@@ -20,16 +20,16 @@ Preserve these boundaries: transport types do not enter core domain types, stale
 
 ## Key Directories
 
-| Path            | Purpose                                                                                        |
-| --------------- | ---------------------------------------------------------------------------------------------- |
-| `src/domain/`   | Effect `Schema` domain values and tagged error types independent of HerdR/Zed.                 |
-| `src/services/` | `Context.Tag` contracts for workspace source, cwd hints, and editor adapter.                   |
-| `src/sync/`     | Project resolution, generation-aware cache, debounce, serialization, and editor orchestration. |
-| `src/herdr/`    | Minimum-protocol wire schemas, NDJSON framing, Unix-socket client, and core source projection. |
-| `src/editor/`   | Timeout-safe, state-preserving Zed CLI adapter.                                                |
-| `src/plugin/`   | Local control protocol/socket plus hook decoding, locking, and pane startup.                   |
-| `test/`         | Bun unit, integration, socket-safety, and built-artifact E2E suites by subsystem.              |
-| `dist/`         | Generated Bun bundle; ignored by Git and recreated by `bun run build`.                         |
+| Path            | Purpose                                                                                                                             |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `src/domain/`   | Effect `Schema` domain values and tagged error types independent of HerdR/Zed.                                                      |
+| `src/services/` | `Context.Tag` contracts for workspace source, cwd hints, and editor adapter.                                                        |
+| `src/sync/`     | Project resolution, generation-aware cache, debounce, serialization, and editor orchestration.                                      |
+| `src/herdr/`    | Minimum-protocol wire schemas, NDJSON framing, local-socket client (Unix socket or Windows named pipe), and core source projection. |
+| `src/editor/`   | Timeout-safe, state-preserving Zed CLI adapter.                                                                                     |
+| `src/plugin/`   | Local control protocol/socket plus hook decoding, locking, and pane startup.                                                        |
+| `test/`         | Bun unit, integration, socket-safety, and built-artifact E2E suites by subsystem.                                                   |
+| `dist/`         | Generated Bun bundle; ignored by Git and recreated by `bun run build`.                                                              |
 
 There is no `src/index.ts`, scripts directory, or separate test configuration. Root `index.ts` and `package.json` are authoritative.
 
@@ -80,7 +80,7 @@ Build before any command or E2E test that uses `dist/index.js`.
 - Preserve checkout-path precedence over hook hints. Do not infer projects from `PWD`, pane metadata, focus order, or editor internals. Linked worktrees remain distinct by canonical path.
 - Never cache failed resolution or editor operations. Recheck generation before cache/editor side effects; disconnecting generation N must leave no effects while N+1 may proceed.
 - Invoke Zed without a shell and with only `-e <absolute-git-root>`. Preserve the five-second timeout, process termination, and bounded final stderr tail.
-- Treat control sockets and hook locks as owner-only resources. Preserve UID, mode, inode, symlink, one-frame, fatal UTF-8, and 64 KiB checks; never blindly unlink or replace a socket path.
+- Treat control sockets and hook locks as owner-only resources. Preserve UID, mode, inode, symlink, one-frame, fatal UTF-8, and 64 KiB checks; never blindly unlink or replace a socket path. On Windows the control endpoint is a named pipe: only the `process.platform`-gated POSIX uid/mode/inode checks are skipped, and frame/UTF-8/size checks stay shared.
 - Keep stable JSON log event names and fields (`workspace_sync_started`, `workspace_sync_succeeded`, `workspace_sync_skipped`, `workspace_sync_failed`). `elapsed_ms` begins at event ingress and includes the debounce.
 
 ## Important Files
@@ -112,8 +112,8 @@ Build before any command or E2E test that uses `dist/index.js`.
 - Production dependencies are Effect 3.22, `@effect/platform` 0.97, and `@effect/platform-bun` 0.91. Use existing platform abstractions before adding Node APIs.
 - TypeScript is strict, no-emit, ESNext, bundler-resolved, verbatim-module ESM with Bun types. `noUncheckedIndexedAccess`, `noImplicitOverride`, and switch fallthrough checks are enabled.
 - Oxfmt and Oxlint are the formatter/linter. Generated/dependency/env outputs, including `dist/` and `bun.lock`, are intentionally excluded from formatting.
-- Runtime assumptions include POSIX UIDs and Unix sockets; the plugin manifest supports only macOS and Linux.
-- Relevant environment configuration: `ZED_BIN`; `HERDR_SOCKET_PATH`; `HERDR_SESSION`; `XDG_CONFIG_HOME`/`HOME`; hook-provided `HERDR_PLUGIN_EVENT_JSON`, `HERDR_WORKSPACE_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PANE_ID`; optional hook CLI override `HERDR_BIN_PATH`. `ZED_HERDR_TEST_DIST` is test-only.
+- macOS and Linux runtime assumptions include POSIX UIDs and Unix sockets. On Windows, HerdR and the control endpoint use named pipes (`\\.\pipe\<socket pathname>` via `localSocketAddress`). The manifest declares macOS, Linux, and Windows.
+- Relevant environment configuration: `ZED_BIN`; `HERDR_SOCKET_PATH`; `HERDR_SESSION`; `XDG_CONFIG_HOME`/`HOME` (`APPDATA`/`USERPROFILE` on Windows); hook-provided `HERDR_PLUGIN_EVENT_JSON`, `HERDR_WORKSPACE_ID`, `HERDR_PLUGIN_CONTEXT_JSON`, and `HERDR_PANE_ID`; optional hook CLI override `HERDR_BIN_PATH`. `ZED_HERDR_TEST_DIST` is test-only.
 
 ## Testing & QA
 
@@ -121,7 +121,7 @@ Build before any command or E2E test that uses `dist/index.js`.
 - Suites mirror subsystems: `test/sync/`, `test/herdr/`, `test/editor/`, `test/plugin/`, and `test/e2e/`.
 - Test observable contracts, not implementation text: exact NDJSON bytes/JSON, CLI argv and ordering, generation transitions, editor-call serialization/dedupe, retry bounds, socket/lock ownership, timeout cleanup, and process exit behavior.
 - Use `Effect.scoped`/`Effect.runPromise` for Effect harnesses. Prefer `TestClock` for debounce and timeout behavior; use fake timers only where the Promise/Bun boundary requires them. Always restore timers and spies.
-- Unix-socket tests use temporary paths and real `Bun.listen`/`Bun.connect`; Git-resolution tests create temporary repositories and linked worktrees. Close listeners, interrupt fibers, terminate children, and remove temporary directories in `finally`.
+- Socket tests use temporary paths and real `Bun.listen`/`Bun.connect`; peers of the production HerdR client and control server go through `localSocketAddress`, so those protocol tests also run over Windows named pipes. Ownership, mode, inode, orphan-socket, and shebang-based E2E tests assume POSIX and do not pass on Windows. Git-resolution tests create temporary repositories and linked worktrees. Close listeners, interrupt fibers, terminate children, and remove temporary directories in `finally`.
 - `test/e2e/daemon.test.ts` exercises the built `dist/index.js` against fake HerdR and Zed socket peers. Run `bun run build` first; its main scenario has a 15-second timeout.
 - Do not assert exact timestamps or nondeterministic jitter. Assert stable tags, fields, ranges, ordering, and final effects.
 - No numeric coverage threshold is configured. Every behavior change should add or update the narrow deterministic contract test; changes crossing the built CLI/socket boundary should also be covered by E2E.
